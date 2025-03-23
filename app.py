@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import logging
 from fastapi import FastAPI, HTTPException, Depends, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +10,10 @@ from datetime import datetime, time
 import uvicorn
 from pydantic import BaseModel
 import hashlib
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -32,6 +37,7 @@ def init_db():
     # Ensure the database directory exists
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     
+    logger.info(f"Initializing database at: {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -62,6 +68,7 @@ def init_db():
                        ("user1", '["video1", "video2", "video3"]', hashlib.sha256("password1".encode()).hexdigest()))
         cursor.executemany("INSERT INTO videos (user_id, video_name, duration) VALUES (?, ?, ?)",
                           [("user1", "video1", 45), ("user1", "video2", 50), ("user1", "video3", 55)])
+        logger.info("Inserted sample data for user1")
     
     cursor.execute("SELECT COUNT(*) FROM users WHERE user_id = 'user2'")
     if cursor.fetchone()[0] == 0:
@@ -69,6 +76,7 @@ def init_db():
                        ("user2", '["video1", "video2", "video3"]', hashlib.sha256("password2".encode()).hexdigest()))
         cursor.executemany("INSERT INTO videos (user_id, video_name, duration) VALUES (?, ?, ?)",
                           [("user2", "video1", 45), ("user2", "video2", 50), ("user2", "video3", 55)])
+        logger.info("Inserted sample data for user2")
     
     conn.commit()
     conn.close()
@@ -85,6 +93,7 @@ def get_user_sequence(user_id: str):
     result = cursor.fetchone()
     conn.close()
     if not result:
+        logger.error(f"User not found: {user_id}")
         raise HTTPException(status_code=404, detail="User not found")
     return json.loads(result[0])
 
@@ -96,6 +105,7 @@ def get_video_duration(user_id: str, video_name: str):
     result = cursor.fetchone()
     conn.close()
     if not result:
+        logger.error(f"Video not found: {video_name} for user {user_id}")
         raise HTTPException(status_code=404, detail="Video not found")
     return result[0]
 
@@ -106,7 +116,9 @@ def verify_user(username: str, password: str):
     result = cursor.fetchone()
     conn.close()
     if not result or result[0] != hashlib.sha256(password.encode()).hexdigest():
+        logger.warning(f"Invalid credentials for user: {username}")
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    logger.info(f"User verified: {username}")
     return username
 
 @app.post("/login")
@@ -117,8 +129,10 @@ async def login(username: str = Form(...), password: str = Form(...)):
 @app.get("/stream/{user_id}")
 async def stream(user_id: str, token: str = Depends(oauth2_scheme)):
     if token != user_id:  # Simplified token check
+        logger.warning(f"Invalid token for user: {user_id}")
         raise HTTPException(status_code=401, detail="Invalid token")
     
+    logger.info(f"Streaming for user_id: {user_id}")
     sequence = get_user_sequence(user_id)
     current_time = datetime.now()
     elapsed_seconds = int((current_time - GLOBAL_START_TIME).total_seconds())
@@ -152,8 +166,10 @@ async def stream(user_id: str, token: str = Depends(oauth2_scheme)):
     # Ensure the video directory and file exist
     os.makedirs(os.path.dirname(video_path), exist_ok=True)
     if not os.path.exists(video_path):
+        logger.error(f"Video not found at path: {video_path}")
         raise HTTPException(status_code=404, detail=f"Video {current_video}.mp4 not found at {video_path}")
     
+    logger.info(f"Serving video: {video_url} with offset: {offset}")
     return {
         "playlist_url": video_url,
         "offset": offset,
@@ -169,16 +185,21 @@ async def debug_db(token: str = Depends(oauth2_scheme)):
     cursor.execute("SELECT * FROM videos")
     videos = cursor.fetchall()
     conn.close()
+    logger.info("Debug DB accessed")
     return {"users": users, "videos": videos}
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
+    logger.info(f"Attempting to serve index.html from: {index_path}")
     if not os.path.exists(index_path):
+        logger.error(f"Index file not found at: {index_path}")
         return HTMLResponse(content="<h1>Index file not found</h1>", status_code=404)
     with open(index_path, "r") as f:
         return f.read()
 
 if __name__ == "__main__":
     init_db()
-    uvicorn.run(app, host="0.0.0.0", port=3333)
+    port = int(os.getenv("PORT", 3333))
+    host = os.getenv("HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)
